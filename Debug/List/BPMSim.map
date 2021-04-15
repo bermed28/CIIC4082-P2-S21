@@ -2,7 +2,7 @@
 #                                                                              #
 #      IAR Universal Linker V6.5.4.100                                         #
 #                                                                              #
-#           Link time     =  12/Apr/2021  19:30:40                             #
+#           Link time     =  14/Apr/2021  21:42:30                             #
 #           Target CPU    =  MSP430                                            #
 #           List file     =  C:\Users\fjbm1\OneDrive\Desktop\CIIC4082\BPMSim\D #
 #                            ebug\List\BPMSim.map                              #
@@ -11,7 +11,7 @@
 #                            Format: ubrof10                                   #
 #                            UBROF version 10.0.6                              #
 #                            Using library modules for C-SPY (-rt)             #
-#           Command line  =  -f C:\Users\fjbm1\AppData\Local\Temp\EW8C31.tmp   #
+#           Command line  =  -f C:\Users\fjbm1\AppData\Local\Temp\EWE197.tmp   #
 #                            (C:\Users\fjbm1\OneDrive\Desktop\CIIC4082\BPMSim\ #
 #                            Debug\Obj\asm.r43                                 #
 #                            -o                                                #
@@ -121,7 +121,7 @@ Absolute parts
   PROGRAM MODULE, NAME : main
 
 Absolute parts
-     1C00 - 1C15
+     1C00 - 1C17
      FFDA - FFDB
      FFE8 - FFE9
      FFFE - FFFF
@@ -130,7 +130,8 @@ Absolute parts
            __MSP430FR5922__        0000 
            DigitH                  1C00 
            DigitL                  1C0A 
-           stsate                  1C14 
+           state                   1C14 
+           S1_Counter              1C16 
   SEGMENTS IN THE MODULE
   ======================
 CSTACK
@@ -138,30 +139,34 @@ CSTACK
   Segment part 0. ROOT 
     -------------------------------------------------------------------------
 <CODE> 1 (was CODE)
-  Relative segment, address: 4400 - 45AF (0x1b0 bytes), align: 1
+  Relative segment, address: 4400 - 462D (0x22e bytes), align: 1
   Segment part 1. ROOT        Intra module refs:   Absolute parts
            ENTRY                   ADDRESS         REF BY
            =====                   =======         ======
            main                    4404 
            LOCAL                   ADDRESS         
            =====                   =======         
-           TIMER_A0_ISR            4490 
-           PORT1_ISR               4494 
+           TIMER_A0_ISR            448E 
+           PORT1_ISR               4490 
            init                    4400 
-           LCD_Setup               4434 
-           drawOption              4578 
-           UnlockGPIO              4466 
-           fin                     4492 
-           sleep                   44C6 
-           optionSelector          44CE 
-           operationSelector       44DC 
-           resetIntFlags           44B4 
-           iterSleep               44C8 
-           return                  45AE 
-           drawRead                4538 
-           drawLog                 4560 
-           drawReadBPM             44E6 
-           drawLogBPM              450A 
+           LCD_Setup               4432 
+           stateInitializer        45D4 
+           UnlockGPIO              4464 
+           finalizeInt             462A 
+           sleep                   4622 
+           S2_States               44AA 
+           S1_States               44CC 
+           resetIntFlags           4610 
+           drawRead                454C 
+           drawLog                 4578 
+           save                    453A 
+           drawOption              4594 
+           recordPulse             44EE 
+           heartBeat               44F4 
+           displayLectures         44FC 
+           saveLectureFRAM         4530 
+           return                  462C 
+           iterSleep               4624 
 
 
 
@@ -176,8 +181,8 @@ CSTACK
 SEGMENT              SPACE    START ADDRESS   END ADDRESS     SIZE  TYPE  ALIGN
 =======              =====    =============   ===========     ====  ====  =====
 CSTACK                                 2360 - 23FF              A0   rel    1
-<CODE> 1                               4400 - 45AF             1B0   rel    1
-                                       1C00 - 1C15              16  aseg  
+<CODE> 1                               4400 - 462D             22E   rel    1
+                                       1C00 - 1C17              18  aseg  
                                        FFDA - FFDB               2  aseg  
                                        FFE8 - FFE9               2  aseg  
                                        FFFE - FFFF               2  aseg  
@@ -188,7 +193,7 @@ CSTACK                                 2360 - 23FF              A0   rel    1
                 *                                      *
                 ****************************************
 
- 432 bytes of CODE memory (+ 28 absolute )
+ 558 bytes of CODE memory (+ 30 absolute )
  160 bytes of DATA memory
 
 Errors: none

@@ -2,9 +2,9 @@
 
         NAME    main                    ; module name
 
-        PUBLIC  main                    ; make the main label vissible
+        PUBLIC  main                    ; make the main label visible
                                         ; outside this module
-
+/**********************INTERRUPT VECTOR DECLARATIONS***************************/
         ORG     0FFE8h                  ; vector for TIMER_A0
         DC16    TIMER_A0_ISR            ; set vector for 'TIMER_A0_ISR' routine
         
@@ -15,13 +15,18 @@
         DC16    init                    ; set reset vector to 'init' label
 
         ORG     01C00h
+        
+/*******************ARRAYS & GLOBAL VARIABLE DECLARATIONS**********************/      
 ;Digits      0     1     2     3     4     5    6    7      8     9
 DigitH  db 0xFC, 0x60, 0xDB, 0xF3, 0x67, 0xB7, 0xBF, 0xE0, 0xFF, 0xE7
 DigitL  db 0x28, 0x20, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
 
 
-stsate  DW      0                       ; TIMER_A0 interrupts counter
+state           DW      0   ; Tells us in what state we are currently at
+                            ; In reference to state diagram developed
+S1_Counter      DW      0   ; Used to count how many times we have pressed S1
 
+/*******************************MAIN SETUP*************************************/
         RSEG    CSTACK                  ; pre-declaration of segment
         RSEG    CODE                    ; place program in 'CODE' segment
 
@@ -43,8 +48,12 @@ main:   NOP                             ; main program
         bis.b   #06h, &P1IES            ; Int generated on high to low transition
         bis.b   #06h, &P1IE             ; Enable interrupt at P1.1/P1.2
 
-        clr     R6
-
+        
+;Objetivo: Prepara los segmentos del LCD Display
+;Precondiciones: N/A
+;Postcondiciones: El LCD sera listo para dibujar en el
+;Autor: Fernando Bermudez
+;Fecha: 14/abr/2021
 LCD_Setup:
     	;Enable LCD segments 0 - 21; 26 - 43
     	mov.w   #0xffff, &LCDCPCTL0
@@ -58,7 +67,7 @@ LCD_Setup:
     	mov.w   #2,&LCDCMEMCTL          ;Clear LCD memory
     	bis.w   #1,&LCDCCTL0            ;Turn LCD on
         
-        call    #drawOption
+        call    #stateInitializer
         
 
 UnlockGPIO:
@@ -98,69 +107,113 @@ UnlockGPIO:
         JMP $                           ; jump to current location '$'
         NOP                             ; (endless loop)
         
+/******************************************************************************/
 
+/**********************INTERRUPT SERVICE ROUTINES******************************/
+;Objetivo: ISR Principal para los temporizadores 
+;Precondiciones: 
+;Postcondiciones: 
+;Autor:  
+;Fecha: ##/abr/2021
 TIMER_A0_ISR:
-        jmp fin
-
-fin:
-        reti
+        jmp finalizeInt
         
-        
+;Objetivo: ISR Principal para los botones 
+;Precondiciones: P1IFG en el Bit 0 o 1 deberia cambiarse a 1
+;Postcondiciones: Los flags de interrupciones se daran reset a 0
+;Autor: Fernando Bermudez
+;Fecha: 14/abr/2021    
 PORT1_ISR:
         call    #sleep
-        bic.b   #11111001b, &P1IFG	;Make Sure buttons are pressed
-
+        
+        bic.b   #11111001b, &P1IFG	;Make sure buttons are pressed
+        
         cmp.b   #00000100b, &P1IFG      ;if right button is pressed
-        jz      optionSelector
+        jz      S2_States
         
         cmp.b   #00000010b, &P1IFG      ;if left button is pressed
-        jz      operationSelector
+        jz      S1_States
         
+        
+        jmp     resetIntFlags           ;If no buttons were pressed, reset default
+        
+        jmp     finalizeInt
+        
+/***************************STATE SELECTORS************************************/
+;Objetivo: Determinar a que estado de la aplicacion se debera mover 
+;          si se presiona el boton S2
+;Precondiciones: La variable state debe guardar el valor 0, 1, 2, 6 o 7
+;Postcondiciones: La variable state sera cambiada cuando entre a la subrutina correspondiente
+;Autor: Fernando Bermudez
+;Fecha: 14/abr/2021
+S2_States:  
+        cmp     #0, state
+        jz      drawRead                ;Move to state READ (1)
+
+        cmp     #1, state
+        jz      drawLog                 ;Move to state LOG (2)
+
+        cmp     #2, state                      
+        jz      drawRead                ;Move back to state READ (1)
+
+        cmp     #6, state
+        jz      save                    ;Move to state SAVE (7)
+
+        cmp     #7, state
+        jz      drawOption              ;Move to state OPTION (0)
+
+;Objetivo: Determinar a que estado de la aplicacion se debera mover 
+;          si se presiona el boton S1
+;Precondiciones: La variable state debe guardar el valor 1, 2, 3, 4 o 7
+;Postcondiciones: La variable state sera cambiada cuando entre a la subrutina correspondiente
+;Autor: Fernando Bermudez
+;Fecha: 14/abr/2021
+S1_States:
+        
+        cmp     #1, state
+        jz      recordPulse             ;Move to state Record Pulse (4)
+
+        cmp     #4, state
+        jz      heartBeat               ;Move to state HeartBeat (5)
+
+        cmp     #2, state                      
+        jz      displayLectures         ;Move to state Display Lectures (3)
+
+        cmp     #3, state                      
+        jz      displayLectures         ;Move back to state Display Lectures (3)
+
+        cmp     #7, state
+        jz      saveLectureFRAM         ;Move to state Save Lecture in FRAM (8)
+        
+/******************************************************************************/        
+
+/***************************S1 STATES******************************************/
+recordPulse:
+        mov       #4, state
+        jmp       resetIntFlags
+        
+heartBeat:
+        mov       #5, state
+        jmp       resetIntFlags
        
-	xor.b  	#0x80,&P9OUT	        ;Toggle green LED
-        jmp     resetIntFlags
+;Objetivo: Poner en la pantalla las ultimas 3 lecturas guardads en la memoria 
+;Precondiciones: La variable S1_Counter debe ser menor que 4
+;Postcondiciones: La variable state sera cambiada a 3 y S1_Counter sera incrementada o reseteada a 0,
+;                 los flags de interrupciones se daran reset
+;Autor: Fernando Bermudez
+;Fecha: 14/abr/2021        
+displayLectures:
+        mov       #3, state
         
-        jmp     fin
+        mov.w     #2,&LCDCMEMCTL         ;Clear LCD memory
+        
+        inc       S1_Counter
+        cmp       #4, S1_Counter         ; If we have finished displaying last
+        jz        drawOption             ; 3 Lectures, return back to state OPTION (0)
+        
+        ;If not, display the latest lecture
 
-
-resetIntFlags:
-        bic.b      #00000110b, &P1IFG	;Reset Interrupt Flag
-        nop
-	xor 	   #CCIE, &TA0CCTL0
-	nop
-        
-        jmp        fin   
-  
-  
-sleep:
-        mov     #65535, R12
-iterSleep:
-        dec     R12
-        jz      return      
-        jmp     iterSleep
-        
-optionSelector:
-        inc     R6
-        cmp     #1,R6
-        jz      drawRead
-        cmp     #2,R6
-        jz      drawLog
-        clr     R6
-        jmp     optionSelector
-     
-     
-operationSelector:
-        cmp     #1, R6
-        jz      drawReadBPM
-        
-        cmp     #2, R6
-        jz      drawLogBPM
-        
-        jmp     resetIntFlags    
-        
-drawReadBPM:
-        mov.w     #2,&LCDCMEMCTL          ;Clear LCD memory
-
+        /*Dummy Display*/
         mov.b     #0xF1,&0xA32                    ;B
         mov.b     #0x50,&0xA33
       
@@ -171,23 +224,28 @@ drawReadBPM:
         
         jmp       resetIntFlags
         
-drawLogBPM:
+saveLectureFRAM:
+        mov       #8, state
         mov.w     #2,&LCDCMEMCTL          ;Clear LCD memory
 
-        mov.b     #0x1C,&0xA29                    ;L
-        mov.b     #0x00,&0xA2A
-        
-        mov.b     #0xF1,&0xA32                    ;B
-        mov.b     #0x50,&0xA33
-      
-        mov.b     #0xCF,&0xA2E                    ;P
+        jmp       drawOption
+/******************************************************************************/
 
-        mov.b     #0x6C,&0xA27                    ;M
-        mov.b     #0xA0,&0xA28
+/***************************S2 STATES******************************************/
+save:
+        mov.w     #2,&LCDCMEMCTL          ;Clear LCD memory
+
+        mov       #0xEF, &0xA23
+        mov       #0x9F, &0xA25           
         jmp       resetIntFlags
         
+;Objetivo: Cambiar al estado READ (1) 
+;Precondiciones: La variable state debe guardar el valor 0 o 2
+;Postcondiciones: La variable state sera cambiada a 1, los flags de interrupciones se daran reset
+;Autor: Fernando Bermudez
+;Fecha: 14/abr/2021    
 drawRead:
-
+        mov       #1, state
         mov.w     #2,&LCDCMEMCTL          ;Clear LCD memory
 
         mov.b     #0xCF, &0xA29           ;R
@@ -201,14 +259,28 @@ drawRead:
         
         jmp       resetIntFlags
         
+;Objetivo: Cambiar al estado LOG (2) 
+;Precondiciones: La variable state debe guardar el valor 0 o 1
+;Postcondiciones: La variable state sera cambiada a 2, los flags de interrupciones se daran reset
+;Autor: Fernando Bermudez
+;Fecha: 14/abr/2021       
 drawLog:
+        mov       #2, state
         mov.w     #2,&LCDCMEMCTL          ;Clear LCD memory
         mov.b     #0x1C, &0xA29           ;L
         mov.b     #0xFC, &0xA25           ;O
         mov.b     #0xBD, &0xA23           ;G
         jmp       resetIntFlags
         
+;Objetivo: Cambiar al estado OPTION (0) 
+;Precondiciones: La variable state debe guardar el valor 3, 7 o 8
+;Postcondiciones: La variable state sera cambiada a 0, los flags de interrupciones se daran reset,
+;                 La variable S1_Counter se le dara reset
+;Autor: Fernando Bermudez
+;Fecha: 14/abr/2021      
 drawOption:
+        mov       #0, state               ;Reset state indicator
+        mov       #0, S1_Counter          ;Reset Log Lecture counter 
         mov.b     #0xFC, &0xA29           ;O
         mov.b     #0xCF, &0xA25           ;P
 
@@ -223,6 +295,53 @@ drawOption:
         mov.b     #0x6C, &0xA27           ;N
         mov.b     #0x82, &0xA28
         
-return:        ret
+        jmp       resetIntFlags
+        
+/******************************************************************************/
 
+/**********************HELPER SUBROUTINES**************************************/
+;Objetivo: Inicializa al estado OPTION (0) 
+;Precondiciones: N/A
+;Postcondiciones: La variable state sera cambiada a 0
+;Autor: Fernando Bermudez
+;Fecha: 14/abr/2021
+stateInitializer:
+        mov       #0, state               ;Force state indicator to 0
+        mov.b     #0xFC, &0xA29           ;O
+        mov.b     #0xCF, &0xA25           ;P
+
+        mov.b     #0x80, &0xA23           ;T
+        mov.b     #0x50, &0xA24
+        
+        mov.b     #0x90, &0xA32           ;I
+        mov.b     #0x50, &0xA33
+        
+        mov.b     #0xFC, &0xA2E           ;O
+
+        mov.b     #0x6C, &0xA27           ;N
+        mov.b     #0x82, &0xA28
+        
+        jmp        return
+
+resetIntFlags:
+        bic.b      #00000110b, &P1IFG	;Reset Interrupt Flag
+        nop
+	xor 	   #CCIE, &TA0CCTL0
+	nop
+        
+        jmp        finalizeInt   
+  
+  
+sleep:
+        mov     #65535, R12
+iterSleep:
+        dec     R12
+        jz      return      
+        jmp     iterSleep
+      
+finalizeInt:
+        reti
+return:        
+        ret
+/******************************************************************************/
         END
