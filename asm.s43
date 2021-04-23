@@ -1,0 +1,795 @@
+#include "msp430.h"                     ; #define controlled include file
+
+        NAME    main                    ; module name
+
+        PUBLIC  main                    ; make the main label visible
+                                        ; outside this module
+/**********************INTERRUPT VECTOR DECLARATIONS***************************/
+        ORG     0FFE8h                  ; vector for TIMER_A0
+        DC16    TIMER_A0_ISR            ; set vector for 'TIMER_A0_ISR' routine
+        
+        ORG     0FFDAh                  ; vector for PORT1
+        DC16    PORT1_ISR               ; set vector for 'PORT1_ISR' routine
+        
+        ORG     0FFFEh                  ; vector for RESET
+        DC16    init                    ; set reset vector to 'init' label
+
+        ORG     01C00h
+        
+/*******************ARRAYS & GLOBAL VARIABLE DECLARATIONS**********************/ 
+
+
+
+;Digits      0     1     2     3     4     5    6    7      8     9
+digitH  db 0xFC, 0x60, 0xDB, 0xF3, 0x67, 0xB7, 0xBF, 0xE0, 0xFF, 0xE7
+digitL  db 0x28, 0x20, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
+
+
+state           DW      0   ; Tells us in what state we are currently at
+                            ; In reference to state diagram developed
+S1_Counter      DW      0   ; Used to count how many times we have pressed S1
+
+timerCounter    DW      0   ; USed for TIMER_A0 interrupts counter
+batCounter    DW      0     ; How many battery bars have been shown
+thirtySecMark   DW      0   ; Indicates when 30 seconds have passed, 5 iterations 
+
+valuesForBatBars db 0x30, 0x20, 0x70, 0x60, 0xF0, 0xE0
+
+segmentsHi        dw  0x0A29, 0x0A25, 0x0A23, 0x0A32, 0x0A2E, 0x0A27
+segmentsLo        dw  0x0A2A, 0x0A26, 0x0A24, 0x0A33, 0x0A2F, 0x0A28
+
+resultArr        db    0, 0, 0
+                 ALIGN 1
+                 
+/************************************FRAM VARIABLES***************************************/
+                 
+         ORG     001980h                     ;FRAM (Info A): 0019FFh - 001980 (128B)
+readingsList db     28, 80, 42
+readingsSize db     3            ;total size capability 
+readingsSaved db    3            ;starts being 0 when there are no readings/lectures saved
+
+/*******************************MAIN SETUP*************************************/
+        RSEG    CSTACK                  ; pre-declaration of segment
+        RSEG    CODE                    ; place program in 'CODE' segment
+
+init:   MOV     #SFE(CSTACK), SP        ; set up stack
+
+main:   NOP                             ; main program
+        MOV.W   #WDTPW+WDTHOLD,&WDTCTL  ; Stop watchdog timer
+
+        
+
+        bis.b   #0F9h, &P1DIR           ; Port 1.1/1.2 for button input, all other as output
+        bis.b   #0FFh, &P2DIR           ; All Port 2 pins as output
+	bis.b   #0FFh, &P9DIR           ; All Port 9 pins as output
+        
+
+	bis.b   #06h, &P1OUT		; P1.1/P1.2 Resistors enabled as pullup
+        bis.b   #06h, &P1REN            ; resistor. Push is read as 0 and else 1
+
+        bis.b   #06h, &P1IES            ; Int generated on high to low transition
+        bis.b   #06h, &P1IE             ; Enable interrupt at P1.1/P1.2
+
+        mov     #0, timerCounter        ; Clear timer counter
+
+        
+;Objetivo: Prepara los segmentos del LCD Display
+;Precondiciones: N/A
+;Postcondiciones: El LCD sera listo para dibujar en el
+;Autor: Fernando Bermudez
+;Fecha: 14/abr/2021
+LCD_Setup:
+    	;Enable LCD segments 0 - 21; 26 - 43
+    	mov.w   #0xffff, &LCDCPCTL0
+    	mov.w   #0xfc3f, &LCDCPCTL1
+    	mov.w   #0x0fff, &LCDCPCTL2
+
+    	bis.w   #1,&LCDCCTL0
+    	mov.w   #0x041e, &LCDCCTL0      ;Initialize LCD_C
+    	mov.w   #0x0208, &LCDCVCTL      ;VLCD generated internally
+    	mov.w   #0x8000, &LCDCCPCTL     ;Clock synchronization enabled 
+    	mov.w   #2,&LCDCMEMCTL          ;Clear LCD memory
+    	bis.w   #1,&LCDCCTL0            ;Turn LCD on
+        
+        call    #stateInitializer
+        
+
+UnlockGPIO:
+        bic.w   #LOCKLPM5,&PM5CTL0      ; Disable the GPIO power-on default
+                                        ; high-impedance mode to activate
+                                        ; previously configured port settings
+
+        mov     #CCIE, &TA0CCTL0        ; Enable TACCR0 interrupt
+
+        mov     #TASSEL_2+MC_1+ID_3, &TA0CTL  ;Set timer according to next table
+	nop
+        ; Uses SMCLK and up mode
+        ; TASSELx        MCx (mode control)                IDx (input divider)
+        ; 00 -> TACLK    00 -> Stop                        00 -> /1
+        ; 01 -> ACLK     01 -> Up mode (up to TACCR0)      01 -> /2
+        ; 10 -> SMCLK    10 -> Continuous (up to 0FFFFh)   02 -> /4
+        ; 11 -> INCLK    11 -> Up/down (top on TACCR0)     03 -> /8
+
+        ; period = cycles * divider / SMLCK
+        ; Assuming SMLCK = 1 MHz, divider = 8 and period = 0.5 seg
+        ; cycles = 62500.  With period = 0.5 LED turn on every 1 second
+        mov     #25000, &TA0CCR0        ; Set the timer capture compare register 0
+        mov     #0, R5 ;batCounter
+        mov     #0, R7 ;for multiplying
+        mov     #0, R8 ;floating, display bpm
+        mov     #0, R9 ;BPM result
+        mov     #7, R6 ;buttonPresses simulated
+        mov     #0, R11 ;floating point
+
+        mov     #0, R14 ; 1 second indicator
+        mov     #0, R15 ; 0.2 indicator
+
+        bic.b   #0000110b, &P1IFG       ; To erase a flag raised before
+               	                        ; activating the GIE. This help to
+                                        ; avoid responding to a push on button
+                                        ; previous to program start.
+	nop				; required befor enabling interrupts
+
+
+        bis     #GIE+LPM0, SR           ; Enable interrupts and enter Low Power mode 0
+                                        ; that doesn't disable timers
+        nop                             ; Required after enabling interrupts
+
+        
+
+        JMP $                           ; jump to current location '$'
+        NOP                             ; (endless loop)
+        
+/******************************************************************************/
+
+/**********************INTERRUPT SERVICE ROUTINES******************************/
+;Objetivo: ISR Principal para los temporizadores 
+;Precondiciones: 
+;Postcondiciones: 
+;Autor:  
+;Fecha: ##/abr/2021
+TIMER_A0_ISR:
+
+        cmp     #4, state
+        jne     finalizeInt      
+        
+        INC     R13
+        INC     R14
+        
+        cmp     #5, R14
+        jz      oneSecondClock
+        
+        cmp     #1, R15
+        jz      heartIndicator
+
+        jmp     finalizeInt
+
+oneSecondClock:
+        MOV     #0, R14
+        jmp     displayBar
+
+heartIndicator:
+        MOV     #0, R15
+        jmp     finalizeInt
+        
+;Objetivo: ISR Principal para los botones 
+;Precondiciones: P1IFG en el Bit 0 o 1 deberia cambiarse a 1
+;Postcondiciones: Los flags de interrupciones se daran reset a 0
+;Autor: Fernando Bermudez
+;Fecha: 14/abr/2021    
+PORT1_ISR:
+        call    #sleep
+        
+        bic.b   #11111001b, &P1IFG	;Make sure buttons are pressed
+        
+        cmp.b   #00000100b, &P1IFG      ;if right button is pressed
+        jz      S2_States
+        
+        cmp.b   #00000010b, &P1IFG      ;if left button is pressed
+        jz      S1_States
+            
+        jmp     resetIntFlags           ;If no buttons were pressed, reset default
+        
+        jmp     finalizeInt
+        
+/***************************STATE SELECTORS************************************/
+;Objetivo: Determinar a que estado de la aplicacion se debera mover 
+;          si se presiona el boton S2
+;Precondiciones: La variable state debe guardar el valor 0, 1, 2, 6 o 7
+;Postcondiciones: La variable state sera cambiada cuando entre a la subrutina correspondiente
+;Autor: Fernando Bermudez
+;Fecha: 14/abr/2021
+S2_States:  
+        cmp     #0, state
+        jz      drawRead                ;Move to state READ (1)
+
+        cmp     #1, state
+        jz      drawLog                 ;Move to state LOG (2)
+
+        cmp     #2, state                      
+        jz      drawRead                ;Move back to state READ (1)
+
+        cmp     #6, state
+        jz      save                    ;Move to state SAVE (7)
+
+        cmp     #7, state
+        jz      drawOption              ;Move to state OPTION (0)
+
+        jmp     resetIntFlags
+
+;Objetivo: Determinar a que estado de la aplicacion se debera mover 
+;          si se presiona el boton S1
+;Precondiciones: La variable state debe guardar el valor 1, 2, 3, 4 o 7
+;Postcondiciones: La variable state sera cambiada cuando entre a la subrutina correspondiente
+;Autor: Fernando Bermudez
+;Fecha: 14/abr/2021
+S1_States:
+        
+        cmp     #1, state
+        jz      initializePulse             ;Move to state Initialize Pulse (9)
+
+        cmp     #4, state
+        jz      heartBeat               ;Move to state HeartBeat (5)
+
+        cmp     #2, state                      
+        jz      displayLectures         ;Move to state Display Lectures (3)
+
+        cmp     #3, state                      
+        jz      displayLectures         ;Move back to state Display Lectures (3)
+
+        cmp     #7, state
+        jz      saveLectureFRAM         ;Move to state Save Lecture in FRAM (8)
+
+        cmp     #9, state
+        jz      recordPulse
+        
+        jmp     resetIntFlags
+        
+/******************************************************************************/        
+
+/***************************S1 STATES******************************************/
+initializePulse:
+        mov       #9, state
+        mov.w     #2,&LCDCMEMCTL
+        mov.b     #00010000B, &0xA31
+        jmp       resetIntFlags
+
+recordPulse:
+        mov       #4, state
+        ;mov.w     #2,&LCDCMEMCTL
+        jmp       resetIntFlags
+        
+heartBeat:
+        mov       #5, state
+        jmp       resetIntFlags
+       
+;Objetivo: Poner en la pantalla las ultimas 3 lecturas guardads en la memoria 
+;Precondiciones: La variable S1_Counter debe ser menor que 4
+;Postcondiciones: La variable state sera cambiada a 3 y S1_Counter sera incrementada o reseteada a 0,
+;                 los flags de interrupciones se daran reset
+;Autor: Fernando Bermudez
+;Fecha: 14/abr/2021        
+displayLectures:
+        mov       #3, state
+        
+        mov.w     #2,&LCDCMEMCTL         ;Clear LCD memory
+        
+        inc       S1_Counter
+        cmp       #4, S1_Counter         ; If we have finished displaying last
+        jz        drawOption             ; 3 Lectures, return back to state OPTION (0)
+        
+        ;If not, display the latest lecture
+
+        cmp.b     #0, readingsSaved       ;for when they are no readings    
+        jeq       noReadings  
+
+        jmp       showReading
+        
+        jmp       resetIntFlags
+        
+;Objetivo: Display NONE 
+;Precondiciones: La variable readingsSaved es 0 y todos los valores en readingsList son 0.
+;Postcondiciones: Memoria LCD anterior cleared y NONE permanece en pantalla. S1_Counter será 1.
+;Autor: Veronica Bernier
+;Fecha: 19/abr/2021  
+noReadings:
+        MOV.W   #2,&LCDCMEMCTL         ;clear LCD memory
+
+        cmp.b   #2, S1_Counter                  ;already displayed None once
+        jeq     drawOption
+
+
+        MOV.B  #01101100B, &0xA25       ;N
+        MOV.B  #10000010B, &0xA26
+        
+        MOV.B  #11111100B, &0xA23       ;O
+        
+        MOV.B  #01101100B, &0xA32       ;N
+        MOV.B  #10000010B, &0xA33
+        
+        MOV.B  #10011111B, &0xA2E       ;E
+
+        ;inc    S1_Counter
+        
+        jmp    resetIntFlags
+
+
+;Objetivo: Display valor siguiente de los BPM guardados
+;Precondiciones: La variable readingsSaved es 1, 2 o 3. 
+;Postcondiciones: Memoria LCD anterior cleared y valor de readingsList en S1_Counter, en pantalla. R7 y R9 serán alterados y R6.
+;Autor: Veronica Bernier
+;Fecha: 19/abr/2021  
+showReading:
+        MOV.W   #2,&LCDCMEMCTL          ;clear LCD memory
+
+        mov     #readingsList, R7
+        add     S1_Counter, R7                  ;move through array (bpms)
+
+        dec     R7 ;fix index from S1_Counter
+        
+        mov.b   0(R7), R9    ; para pasar valor indicado a extract digits
+        
+        mov.b   #0, R6                  ;R6: arreglo de digitos
+        call    #extractDigits          ;get array of digits into result
+
+        bic.b   #00000010b, &P1IFG      ; Clear interrupt flag 
+
+        mov      #0, R14
+        jmp      displayBPM                   ;display array of digits (reading)
+        
+        jmp     finalizeInt
+        
+saveLectureFRAM:
+        mov       #8, state
+        mov.w     #2,&LCDCMEMCTL          ;Clear LCD memory
+
+        jmp       drawOption
+/******************************************************************************/
+
+/***************************S2 STATES******************************************/
+save:
+        mov.w     #2,&LCDCMEMCTL          ;Clear LCD memory
+        mov       #7, state
+        mov.b     #10110111b, &0xA25
+        mov.b     #11101111b, &0xA23    
+        mov.b     #01111100b, &0xA32
+        mov.b     #10011111b, &0xA2E           
+        jmp       resetIntFlags
+        
+;Objetivo: Cambiar al estado READ (1) 
+;Precondiciones: La variable state debe guardar el valor 0 o 2
+;Postcondiciones: La variable state sera cambiada a 1, los flags de interrupciones se daran reset
+;Autor: Fernando Bermudez
+;Fecha: 14/abr/2021    
+drawRead:
+        mov       #1, state
+        mov.w     #2,&LCDCMEMCTL          ;Clear LCD memory
+
+        mov.b     #0xCF, &0xA29           ;R
+        mov.b     #0x02, &0xA2A           
+        
+        mov.b     #0x9F, &0xA25           ;E
+        mov.b     #0xEF, &0xA23           ;A
+
+        mov.b     #0xF0, &0xA32           ;D
+        mov.b     #0X50, &0xA33           
+        
+        jmp       resetIntFlags
+        
+;Objetivo: Cambiar al estado LOG (2) 
+;Precondiciones: La variable state debe guardar el valor 0 o 1
+;Postcondiciones: La variable state sera cambiada a 2, los flags de interrupciones se daran reset
+;Autor: Fernando Bermudez
+;Fecha: 14/abr/2021       
+drawLog:
+        mov       #2, state
+        mov.w     #2,&LCDCMEMCTL          ;Clear LCD memory
+        mov.b     #0x1C, &0xA29           ;L
+        mov.b     #0xFC, &0xA25           ;O
+        mov.b     #0xBD, &0xA23           ;G
+        jmp       resetIntFlags
+        
+;Objetivo: Cambiar al estado OPTION (0) 
+;Precondiciones: La variable state debe guardar el valor 3, 7 o 8
+;Postcondiciones: La variable state sera cambiada a 0, los flags de interrupciones se daran reset,
+;                 La variable S1_Counter se le dara reset
+;Autor: Fernando Bermudez
+;Fecha: 14/abr/2021      
+drawOption:
+        mov       #0, state               ;Reset state indicator
+        mov       #0, S1_Counter          ;Reset Log Lecture counter 
+        mov.b     #0xFC, &0xA29           ;O
+        mov.b     #0xCF, &0xA25           ;P
+
+        mov.b     #0x80, &0xA23           ;T
+        mov.b     #0x50, &0xA24
+        
+        mov.b     #0x90, &0xA32           ;I
+        mov.b     #0x50, &0xA33
+        
+        mov.b     #0xFC, &0xA2E           ;O
+
+        mov.b     #0x6C, &0xA27           ;N
+        mov.b     #0x82, &0xA28
+        
+        jmp       resetIntFlags
+        
+/******************************************************************************/
+
+/**********************HELPER SUBROUTINES**************************************/
+;Objetivo: Inicializa al estado OPTION (0) 
+;Precondiciones: N/A
+;Postcondiciones: La variable state sera cambiada a 0
+;Autor: Fernando Bermudez
+;Fecha: 14/abr/2021
+stateInitializer:
+        mov       #0, state               ;Force state indicator to 0
+        mov.b     #0xFC, &0xA29           ;O
+        mov.b     #0xCF, &0xA25           ;P
+
+        mov.b     #0x80, &0xA23           ;T
+        mov.b     #0x50, &0xA24
+        
+        mov.b     #0x90, &0xA32           ;I
+        mov.b     #0x50, &0xA33
+        
+        mov.b     #0xFC, &0xA2E           ;O
+
+        mov.b     #0x6C, &0xA27           ;N
+        mov.b     #0x82, &0xA28
+        
+        jmp        return
+
+resetIntFlags:
+        bic.b      #00000110b, &P1IFG	;Reset Interrupt Flag
+        nop
+	;xor 	   #CCIE, &TA0CCTL0
+	;nop
+        
+        jmp        finalizeInt 
+  
+sleep:
+        mov     #65535, R12
+iterSleep:
+        dec     R12
+        jz      return      
+        jmp     iterSleep
+
+;Objetivo: Mostrar las barras de bateria en el LCD. Y cuando este completa, darle un reset y continuar con el proximo paso.
+;Precondiciones: Debemos estar en el estado 5
+;Postcondiciones: R5 no tendra efectos secundarios
+;Autor: Jose Biescas
+;Fecha: 3/16/2021
+displayBar:
+        push    R5
+        CMP.B   #6, R5
+        JEQ     resetBar
+        AND.B   #1, R5
+        CMP.B   #1, R5
+        JEQ     numOdd
+        CMP.B   #0, R5
+        JEQ     numEven 
+
+;Objetivo: Hace display a las barras en posiciones impares
+;Precondiciones: N/A
+;Postcondiciones: R5 no tendra efectos secundarios
+;Autor: Jose Biescas
+;Fecha: 3/16/2021
+numOdd
+        pop     R5
+        MOV.B   valuesForBatBars(R5), &0xA2D
+        INC     R5
+        JMP     finalizeInt
+
+;Objetivo: Hace display a las barras en posiciones pares
+;Precondiciones: N/A
+;Postcondiciones: R5 no tendra efectos secundarios
+;Autor: Jose Biescas
+;Fecha: 3/16/2021
+numEven:
+        pop     R5
+        MOV.B   valuesForBatBars(R5), &0xA31
+        INC     R5
+        JMP     finalizeInt
+
+;Objetivo: Hacer un clear a las barras de la bateria y empezar a calcular el BPM.
+;Precondiciones: El Registro R5 debe contener el numero #6, indicando que hay 6 barras en el LCD.
+;Postcondiciones: N/A
+;Autor: Jose Biescas
+;Fecha: 3/16/2021
+resetBar:
+        ;Resetting bars
+        pop     R5
+        MOV.B   #0, &0xA2D
+        MOV.B   #00010000B, &0xA31
+        MOV     #0, R5
+        MOV     #0, R9
+        INC     thirtySecMark
+        
+        ;Display BPM
+        JMP     calcBPM
+        
+        ;JMP     finalizeInt
+
+
+;Objetivo: Subrutina principal que decide el decimal por el cual se va multiplicar los pulsos.
+;Precondiciones: Debieron de pasar 6 segundos. R7 va contener el multiplo.
+;Postcondiciones: N/A
+;Autor: Jose Biescas
+;Fecha: 3/16/2021
+calcBPM:
+        ;First 6: buttonPresses* 10
+        ; 12 seconds: buttonPresses * 5
+        ; 18 seconds: buttonPresses * 3.3333...
+        ; 24 seconds: buttonPresses * 2.5
+        ; 30 seconds: buttonPresses * 2 
+        CMP     #1, thirtySecMark
+        MOV     #10, R7
+        jeq     mult
+        CMP     #2, thirtySecMark
+        mov     #18, R6
+        MOV     #5, R7
+        jeq     mult
+        CMP     #3, thirtySecMark
+        mov     #23, R6
+        MOV     #3, R7 ;dec
+        MOV     #3, R8 ;float
+        jeq     multDec
+        CMP     #4, thirtySecMark
+        mov     #30, R6
+        MOV     #2, R7 ;dec
+        MOV     #5, R8 ;float
+        jeq     multDec
+        CMP     #5, thirtySecMark
+        mov     #37, R6
+        MOV     #2, R7
+        jeq     mult
+        
+        jmp     finalizeInt
+
+;Objetivo: Multiplicar el valor en R6, R7 veces.
+;Precondiciones: N/A
+;Postcondiciones: N/A
+;Autor: Jose Biescas
+;Fecha: 3/16/2021
+mult:
+        add.w   R6, R9
+        dec     R7
+        jz      multDisp
+        jmp     mult
+
+;Objetivo: Llamar la extraccion de digitos para luego continuar el proceso.
+;Precondiciones: N/A
+;Postcondiciones: N/A
+;Autor: Jose Biescas
+;Fecha: 3/16/2021
+multDisp:
+        call    #extractDigits
+        jmp     resetBPM
+
+;Objetivo: Multiplicar el valor en R6, R7 veces.
+;Precondiciones: N/A
+;Postcondiciones: N/A
+;Autor: Jose Biescas
+;Fecha: 3/16/2021
+multDec:
+        
+        add.w   R6, R9
+        dec     R7
+        jz      multFloatPar
+        jmp     multDec
+
+;Objetivo: Hacer la multiplicacion floating point.
+;Precondiciones: N/A
+;Postcondiciones: R7 y R11 no tendran efectos secundarios
+;Autor: Jose Biescas
+;Fecha: 3/16/2021
+multFloatPar:
+        push    R7
+        push    R11
+        mov     R8, R7
+        call    #multFloat
+        pop     R11
+        pop     R7
+        call    #extractDigits
+        jmp     resetBPM
+
+;Objetivo: Multiplicar el valor en R6, R7 veces y guardarlo en R11.
+;Precondiciones: N/A
+;Postcondiciones: N/A
+;Autor: Jose Biescas
+;Fecha: 3/16/2021
+multFloat:
+        add.w   R6, R11
+        dec     R7
+        jz      subFloat
+        jmp     multFloat
+;Objetivo: Restarle 10 a R11 hasta mas no poder.
+;Precondiciones: N/A
+;Postcondiciones: N/A
+;Autor: Jose Biescas
+;Fecha: 3/16/2021        
+subFloat:
+        SUB.W   #10, R11
+        JN      addFloat
+        INC     R7
+        jmp     subFloat
+
+;Objetivo: R7 contiene el digito que se tiene que sumar al resultado despues de la multiplicacion del floating point.
+;Precondiciones: N/A
+;Postcondiciones: N/A
+;Autor: Jose Biescas
+;Fecha: 3/16/2021
+addFloat:
+        add.w   R7, R9
+        ret
+
+;Objetivo: R7 contiene el digito que se tiene que sumar al resultado despues de la multiplicacion del floating point.
+;Precondiciones: La multiplicacion y la extraccion de digitos ya fue completada
+;Postcondiciones: N/A
+;Autor: Jose Biescas
+;Fecha: 3/16/2021
+resetBPM:
+        MOV.b     #0, R8 ;Reset R8 since it used to store the float value for multiplication
+        MOV.b     #0, &0x0A29
+        MOV.b     #0, &0x0A25
+        MOV.b     #0, &0x0A23
+        jmp       displayBPM
+        
+;Objetivo: Hacer display del resultado de BPM en el LCD. Los digitos se encuentran en la lista resultArr
+;Precondiciones: N/A
+;Postcondiciones: R13 y R14 no tendran efectos secundarios.
+;Autor: Jose Biescas
+;Fecha: 3/16/2021        
+displayBPM:
+        
+        push      R13
+        push      R14
+
+        mov.w     #resultArr, R7
+        add.w     R6, R7
+        
+        mov.w     #segmentsHi, R13
+        mov.w     #segmentsLo, R14
+        add.w     R8, R13
+        add.w     R8, R14
+        mov.b     0(R7), R7
+        mov.w     0(R13), R13
+        mov.w     0(R14), R14
+        
+        MOV.B     digitH(R7), 0(R13)
+        
+        mov.b     #0xF1,&0xA32                    ;B
+        mov.b     #0x50,&0xA33
+      
+        mov.b     #0xCF,&0xA2E                    ;P
+
+        mov.b     #0x6C,&0xA27                    ;M
+        mov.b     #0xA0,&0xA28
+        
+        pop       R14
+        pop       R13
+        dec       R6
+        incd      R8
+        
+        cmp       #1, R6
+        jge       displayBPM
+        
+        mov       #0, R8
+        
+        CMP       #5, thirtySecMark
+        jeq       changeState
+
+        jmp       finalizeInt
+        
+;Objetivo: Cambiar de estado al terminar la lectura de pulsos
+;Precondiciones: N/A
+;Postcondiciones: N/A
+;Autor: Jose Biescas
+;Fecha: 3/23/2021        
+changeState:
+        mov       #6, state
+        mov.b     #8, &0xA22
+        jmp       finalizeInt
+        
+        
+;Objetivo: Dado un valor, extraer cada digito en decimal.
+;Precondiciones: R9 contiene el valor original. R6 se usa como arreglo.
+;Postcondiciones: El registro R9 no tendra efectos secundarios. El registro R6 sera alterado.
+;Autor: Ver?nica Bernier
+;Fecha: 3/14/2021
+extractDigits:
+                        ;R9 contiene el valor completo
+        push R9
+        ;push R7
+        ;push R6
+        mov.b   #0, R7
+        mov.b   #0, R6                  ;R6: arreglo de digitos
+        jmp     keepExtracting
+
+;Objetivo: Dado un valor, extraer cada digito en decimal.
+;Precondiciones: R9 contiene el valor original. R6 se usa como arreglo.
+;Postcondiciones: El registro R9 no tendra efectos secundarios. El registro R6 sera alterado.
+;Autor: Ver?nica Bernier
+;Fecha: 3/14/2021
+keepExtracting:
+        call    #module10
+        inc     R6
+        mov.b   R7, resultArr(R6)
+        call    #division10
+        mov.w   R7, R9
+        cmp.w   #1, R9
+        JGE     keepExtracting
+        ;pop     R6
+        ;pop     R7
+        pop     R9
+        ret
+
+;Objetivo: Dividir el valor en el registro R9 por 10.
+;Precondiciones: R9 contiene el valor original. R7 se usa temporalmente.
+;Postcondiciones: El registro R9 no tendra efectos secundarios. El registro R7 sera alterado.
+;Autor: Ver?nica Bernier
+;Fecha: 3/14/2021
+division10:
+        push    R9
+        ;push    R7
+        ;push    R6                       ;we'll manipulate R9 (R9 / 10)
+        mov.w   #0, R7                   ;R7 returns the coecient (result)
+        sub.w   #10, R9
+        cmp.w   #0, R9
+        JGE     keepSubstractingDiv10
+        ;pop     R6
+        ;pop     R7
+        pop     R9                      ;restore value
+        ret
+
+;Objetivo: Restar  10 al valor en el registro R9 hasta que sea negativo.
+;Precondiciones: R9 contiene el valor original. R7 se usa temporalmente.
+;Postcondiciones: El registro R9 no tendra efectos secundarios. El registro R7 sera alterado.
+;Autor: Ver?nica Bernier
+;Fecha: 3/14/2021
+keepSubstractingDiv10:
+        inc     R7
+        sub.w   #10, R9
+        cmp.w   #0, R9
+        JGE     keepSubstractingDiv10
+        ;pop     R6
+        ;pop     R7
+        pop     R9                      ;restore value
+        ret
+
+;Objetivo: Encontrar el residuo de R9 mod 10
+;Precondiciones: R9 contiene el valor original. R7 se usa temporalmente.
+;Postcondiciones: El registro R9 no tendra efectos secundarios. El registro R7 sera alterado.
+;Autor: Ver?nica Bernier
+;Fecha: 3/14/2021
+module10:
+        push    R9                       ;we'll manipulate R9(R9 mod 10)
+        sub.w   #10, R9
+        cmp.w   #0, R9
+        JGE     keepSubstractingMod10
+        add.w   #10, R9
+        mov.w   R9, R7                  ;R7 returns the "residuo" (result)
+        pop     R9                      ;restore value
+        ret
+
+;Objetivo: Restar  10 al valor en el registro R9 hasta que sea negativo y devolver el residuo en R7.
+;Precondiciones: R9 contiene el valor original. R7 se usa temporalmente.
+;Postcondiciones: El registro R9 no tendra efectos secundarios. El registro R7 sera alterado.
+;Autor: Ver?nica Bernier
+;Fecha: 3/14/2021
+keepSubstractingMod10:
+        sub.w   #10, R9
+        cmp.w   #0, R9
+        JGE     keepSubstractingMod10
+        add.w   #10, R9
+        mov.w   R9, R7                  ;R7 returns the "residuo" (result)
+        pop     R9                      ;restore value
+        ret
+
+finalizeInt:
+        reti
+return:        
+        ret
+/******************************************************************************/
+        END
