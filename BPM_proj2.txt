@@ -159,20 +159,30 @@ TIMER_A0_ISR:
 	cmp	#5, R14
 	jz	oneSecondClock
 
-	cmp	#0, R15
-	jne     heartIndicator
-    	jmp      resetIntFlags
+	cmp	#2, R15
+	jeq     onHeartIndicator
+    	
+        
+        cmp     #1, R15
+        jeq     offHeartIndicator
+        jmp     resetIntFlags
 
 oneSecondClock:
 	mov	#0, R14
 	Jmp	displayBar
 
 
-heartIndicator:
+onHeartIndicator:
 	
-	xor	#00000100b,&0xA22
+	mov	#00000100b,&0xA22
 	dec	 R15
 	jmp     resetIntFlags
+
+offHeartIndicator:
+        mov     #00000000b, &0xA22
+        dec     R15
+        jmp     resetIntFlags
+
 
         
 ;Objetivo: ISR Principal para los botones 
@@ -254,7 +264,7 @@ S1_States:
 recordPulse:
         mov   	#4, state
     	Inc	r6
-	Incd	r15
+	mov     #2, R15
     	jmp   	resetIntFlags
 
 initializePulse:
