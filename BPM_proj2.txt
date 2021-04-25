@@ -16,38 +16,36 @@
 
         ORG     01C00h
         
-/*********************************RAM VARIABLES********************************/ 
+/*******************ARRAYS & GLOBAL VARIABLE DECLARATIONS**********************/ 
 
 state           DW      0   ; Tells us in what state we are currently at
                             ; In reference to state diagram developed
 S1_Counter      DW      0   ; Used to count how many times we have pressed S1
 
 timerCounter    DW      0   ; USed for TIMER_A0 interrupts counter
-batCounter      DW      0   ; How many battery bars have been shown
+batCounter      DW      0     ; How many battery bars have been shown
 thirtySecMark   DW      0   ; Indicates when 30 seconds have passed, 5 iterations 
+    
+/************************************FRAM VARIABLES***************************************/
                  
-/**************************FRAM VARIABLES***************************************/
-                 
-                 ORG     001980h                     ;FRAM (Info A): 0019FFh - 001980 (128B)
+         ORG     001980h                     ;FRAM (Info A): 0019FFh - 001980 (128B)
 
-;Digits                 0     1     2     3     4     5    6    7      8     9
-digitH           db    0xFC, 0x60, 0xDB, 0xF3, 0x67, 0xB7, 0xBF, 0xE0, 0xFF, 0xE7
-digitL           db    0x28, 0x20, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
+;Digits                0     1     2     3     4     5    6    7      8     9
+digitH            db 0xFC, 0x60, 0xDB, 0xF3, 0x67, 0xB7, 0xBF, 0xE0, 0xFF, 0xE7
+digitL            db 0x28, 0x20, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
 
-readingsList     db    28, 80, 42
-readingsSize     db    3            ;total size capability 
-readingsSaved    db    0            ;starts being 0 when there are no readings/lectures saved
+readingsList      db    28, 80, 42
+readingsSize      db    3            ;total size capability 
+readingsSaved     db    0            ;starts being 0 when there are no readings/lectures saved
 
-valuesForBatBars db 0x30, 0x20, 0x70, 0x60, 0xF0, 0xE0
+valuesForBatBars  db 0x30, 0x20, 0x70, 0x60, 0xF0, 0xE0
 
-                 ALIGN 1
-                 
-segmentsHi       dw  0x0A29, 0x0A25, 0x0A23, 0x0A32, 0x0A2E, 0x0A27
-segmentsLo       dw  0x0A2A, 0x0A26, 0x0A24, 0x0A33, 0x0A2F, 0x0A28
-                 
+                  ALIGN 1
+                  
+segmentsHi        dw  0x0A29, 0x0A25, 0x0A23, 0x0A32, 0x0A2E, 0x0A27
+segmentsLo        dw  0x0A2A, 0x0A26, 0x0A24, 0x0A33, 0x0A2F, 0x0A28
 
-resultArr        db    0, 0, 0
-                 
+resultArr         db    0, 0, 0
 
 /*******************************MAIN SETUP*************************************/
         RSEG    CSTACK                  ; pre-declaration of segment
@@ -71,7 +69,7 @@ main:   NOP                             ; main program
         bis.b   #06h, &P1IES            ; Int generated on high to low transition
         bis.b   #06h, &P1IE             ; Enable interrupt at P1.1/P1.2
 
-        call    #initProgram            ; Clear timer counter
+        call    #initProgram           ; Clear timer counter
 
         
 ;Objetivo: Prepara los segmentos del LCD Display
@@ -160,30 +158,20 @@ TIMER_A0_ISR:
 	cmp	#5, R14
 	jz	oneSecondClock
 
-	cmp	#2, R15
-	jeq     onHeartIndicator
-    	
-        
-        cmp     #1, R15
-        jeq     offHeartIndicator
-        jmp     resetIntFlags
+	cmp	#0, R15
+	jne     heartIndicator
+    	jmp      resetIntFlags
 
 oneSecondClock:
 	mov	#0, R14
 	Jmp	displayBar
 
 
-onHeartIndicator:
+heartIndicator:
 	
-	mov	#00000100b,&0xA22
+	xor	#00000100b,&0xA22
 	dec	 R15
 	jmp     resetIntFlags
-
-offHeartIndicator:
-        mov     #00000000b, &0xA22
-        dec     R15
-        jmp     resetIntFlags
-
 
         
 ;Objetivo: ISR Principal para los botones 
@@ -265,7 +253,7 @@ S1_States:
 recordPulse:
         mov   	#4, state
     	Inc	r6
-	mov     #2, R15
+	Incd	r15
     	jmp   	resetIntFlags
 
 initializePulse:
@@ -399,7 +387,9 @@ queueReadings:
         push    R5
         push    R6
         
-        mov.b   readingsSaved,R6       ;#3 --> R6 (counter)
+        //lo que da error:
+        
+        mov.b   readingsSaved, R6       ;#3 --> R6 (counter)
         dec.b   R6
         call    #moveQueueReadings
         
@@ -413,19 +403,17 @@ queueReadings:
 ;Precondiciones: El registro R6 es #2. R9 contiene el valor de BPM nuevo.  readingList es
 ;                la localización en FRAM con los valores previos del BPM.
 ;Postcondiciones:  El registro R6 es #0. readingsList(0) contiene el valor de R9. 
-;                  Los valores de readingsList(i) han sido reemplazados por los valores 
-;                  en readingList(i-1) donde n es el indice.
+;                  Los valores de readingsList(n) han sido reemplazados por los valores 
+;                  en readingList(n-1) donde n es el indice.
 ;Autor: Veronica Bernier
 ;Fecha: 23/abr/2021  
 moveQueueReadings:
         
-        dec.b   R6                                  
-        mov.b   readingsList(R6),R5         ;readingsList(i - 1) --> R5       
-        inc.b   R6                              
-        mov.b   R5, readingsList(R6)        ;R5 --> readingsList(i) 
+        mov.b   readingsList(R6),R5            
+        dec.b   R6                              
+        mov.b   R5, readingsList(R6)
         
-        dec.b   R6
-        cmp.b   #1, R6
+        cmp.b   #0, R6
         jge     moveQueueReadings
         
         mov.b   R9, readingsList(R6)         ;save new value
@@ -871,22 +859,21 @@ keepSubstractingMod10:
         mov.w   R9, R7                  ;R7 returns the "residuo" (result)
         pop     R9                      ;restore value
         ret
-	
+        
 ;Objetivo: Inicializar las varibales guardadas en el RAM
 ;Precondiciones: El programa esta comenzando por primera vez, este corriendo desde el IAR o no, al igual que conectado a cualquier fuente
 ;Postcondiciones: Todas las variables guardadas en el RAM seran inicializadas a 0
 ;Autor: Fernando Bermudez
 ;Fecha: 4/25/2021 
 initProgram:
-        ;Initialize all variables stored in RAM
-        mov     #0, state        
-        mov     #0, S1_Counter        
-        mov     #0, timerCounter        
-        mov     #0, batCounter       
-        mov     #0, thirtySecMark 
+        mov     #0, state
+        mov     #0, S1_Counter
+        mov     #0, timerCounter
+        mov     #0, batCounter
+        mov     #0, thirtySecMark
         
         ret
-
+        
 finalizeInt:
         reti
 return:        
